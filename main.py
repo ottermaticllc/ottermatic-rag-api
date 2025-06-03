@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Ottermatic RAG Chatbot API",
     description="AI-powered chatbot with knowledge base search and conversational memory",
-    version="1.0.2"
+    version="1.0.4"
 )
 
 # Add CORS middleware
@@ -45,7 +45,7 @@ class ChatRequest(BaseModel):
     question: str
     user_id: Optional[str] = None
     conversation_id: Optional[str] = None
-    max_results: Optional[int] = 5
+    max_results: Optional[int] = 5  # Number of knowledge base documents to retrieve
 
 class ChatResponse(BaseModel):
     answer: str
@@ -85,7 +85,7 @@ def create_embedding(text: str) -> List[float]:
 def search_knowledge_base(query_embedding: List[float], max_results: int = 5) -> List[dict]:
     """Search Supabase knowledge base using vector similarity"""
     try:
-        logger.info("🔎 Searching knowledge base with vector similarity...")
+        logger.info(f"🔎 Searching knowledge base for top {max_results} matches...")
         
         # Convert embedding to string format for Supabase RPC
         embedding_str = str(query_embedding)
@@ -156,67 +156,79 @@ def save_conversation_message(user_id: str, conversation_id: str, role: str, mes
     except Exception as e:
         logger.warning(f"⚠️ Failed to save conversation message: {e}")
 
-def get_conversation_context(conversation_id: str, max_messages: int = 6) -> List[dict]:
+def get_conversation_context(conversation_id: str, max_messages: int = 10) -> List[dict]:
     """Get recent conversation history as structured messages"""
     try:
+        logger.info(f"📚 Loading conversation history for: {conversation_id}")
+        
         result = supabase.table('conversation_logs').select(
             'role, message, timestamp'
         ).eq('conversation_id', conversation_id).order(
-            'timestamp', desc=False
+            'timestamp', desc=False  # Oldest first for proper conversation flow
         ).limit(max_messages).execute()
         
         messages = result.data if result.data else []
-        logger.info(f"📚 Retrieved {len(messages)} previous messages for context")
+        logger.info(f"📖 Retrieved {len(messages)} previous messages for context")
+        
+        # Debug: Log the messages being retrieved
+        for i, msg in enumerate(messages):
+            logger.info(f"  {i+1}. {msg['role']}: {msg['message'][:50]}...")
+            
         return messages
     except Exception as e:
-        logger.warning(f"⚠️ Error loading conversation memory: {e}")
+        logger.error(f"❌ Error loading conversation memory: {e}")
         return []
 
 def generate_response_with_memory(question: str, rag_context: str, conversation_history: List[dict]) -> str:
-    """Generate response using both RAG context and conversation memory"""
+    """Generate response using both RAG context and conversation memory - OPTIMIZED"""
     try:
-        # Build messages array for OpenAI Chat Completions
-        messages = [
-            {
-                "role": "system", 
-                "content": f"""You are Ottermatic's helpful AI assistant with access to a comprehensive knowledge base about our services, policies, and information.
+        # Build system prompt with RAG context
+        system_content = f"""You are Ottermatic's helpful AI assistant with access to a comprehensive knowledge base.
 
 KNOWLEDGE BASE CONTEXT:
 {rag_context}
 
-Guidelines:
-- Use the knowledge base information to provide accurate, specific answers
-- Reference conversation history to maintain context and avoid repeating information
-- If the user asks follow-up questions, build on previous responses
-- If information isn't in the knowledge base, acknowledge this clearly
+IMPORTANT INSTRUCTIONS:
+- You have access to the conversation history and should reference it when answering
+- If asked about previous questions or conversations, refer to the chat history
+- Build on previous responses naturally 
+- Use the knowledge base for factual information about Ottermatic
+- If you don't know something from either source, say so clearly
 - Keep responses helpful, professional, and conversational"""
-            }
-        ]
+
+        # Start with system message
+        messages = [{"role": "system", "content": system_content}]
         
-        # Add conversation history (last 6 messages for context)
-        for msg in conversation_history[-6:]:  # Limit to prevent token overflow
-            messages.append({
-                "role": msg['role'],
-                "content": msg['message']
-            })
+        # Add conversation history (maintain conversation flow)
+        if conversation_history:
+            logger.info(f"💭 Adding {len(conversation_history)} previous messages to context")
+            for msg in conversation_history[-10:]:  # Last 10 messages for better context
+                messages.append({
+                    "role": msg['role'], 
+                    "content": msg['message']
+                })
+        else:
+            logger.info("🆕 No previous conversation history found")
         
         # Add current question
-        messages.append({
-            "role": "user",
-            "content": question
-        })
+        messages.append({"role": "user", "content": question})
         
-        logger.info(f"💬 Generating response with {len(conversation_history)} previous messages")
+        # Debug: Log the conversation structure being sent
+        logger.info(f"🔄 Sending {len(messages)} messages to OpenAI (gpt-4o-mini):")
+        for i, msg in enumerate(messages):
+            role = msg['role']
+            content_preview = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
+            logger.info(f"  {i+1}. {role}: {content_preview}")
         
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o-mini",    # ✅ OPTIMIZED: 67x cheaper than gpt-4!
             messages=messages,
-            max_tokens=500,
-            temperature=0.7
+            max_tokens=1000,        # ✅ OPTIMIZED: Increased from 500 for fuller responses
+            temperature=0.5         # ✅ OPTIMIZED: Balanced creativity vs consistency
         )
         
         answer = response.choices[0].message.content.strip()
-        logger.info("✅ Response generated successfully")
+        logger.info("✅ Response generated with gpt-4o-mini (fast & cost-effective)")
         return answer
         
     except Exception as e:
@@ -229,7 +241,7 @@ async def root():
     """Root endpoint - API status check"""
     return HealthResponse(
         status="running",
-        message="RAG Chatbot API"
+        message="RAG Chatbot API (Optimized)"
     )
 
 @app.get("/health", response_model=HealthResponse)
@@ -245,7 +257,7 @@ async def health_check(api_key: str = Depends(verify_api_key)):
         logger.info("✅ Health check passed - all systems operational")
         return HealthResponse(
             status="healthy",
-            message="All systems operational"
+            message="All systems operational (gpt-4o-mini optimized)"
         )
     except Exception as e:
         logger.error(f"❌ Health check failed: {e}")
@@ -253,7 +265,7 @@ async def health_check(api_key: str = Depends(verify_api_key)):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
-    """Main chat endpoint with RAG and conversation memory"""
+    """Main chat endpoint with RAG and conversation memory - OPTIMIZED"""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
@@ -261,10 +273,11 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
     conversation_id = request.conversation_id or str(uuid.uuid4())
     
     logger.info(f"🔄 Processing chat request for conversation: {conversation_id}")
+    logger.info(f"❓ User question: {request.question}")
 
     try:
-        # Get conversation history as structured messages
-        conversation_history = get_conversation_context(conversation_id, max_messages=10)
+        # FIRST: Get conversation history BEFORE generating response
+        conversation_history = get_conversation_context(conversation_id, max_messages=15)
         
         # Create embedding and search knowledge base
         logger.info("🔍 Creating embedding for knowledge base search...")
@@ -273,16 +286,16 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
         rag_context, sources, confidence = format_context(search_results)
         
         # Generate response using both RAG and conversation memory
-        logger.info("🤖 Generating response with conversation memory...")
+        logger.info("🤖 Generating response with optimized gpt-4o-mini...")
         answer = generate_response_with_memory(request.question, rag_context, conversation_history)
 
-        # Save conversation (user message and assistant response)
+        # THEN: Save the NEW conversation messages AFTER generating response
         if request.user_id:
-            logger.info("💾 Saving conversation messages...")
+            logger.info("💾 Saving NEW conversation messages...")
             save_conversation_message(request.user_id, conversation_id, "user", request.question)
             save_conversation_message(request.user_id, conversation_id, "assistant", answer)
-
-        logger.info(f"✅ Chat response generated with confidence: {confidence}")
+        
+        logger.info(f"✅ Chat response completed - Confidence: {confidence:.3f}")
         
         return ChatResponse(
             answer=answer,
@@ -302,7 +315,10 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
 async def test_endpoint():
     """Test endpoint to verify configuration (no auth required)"""
     return {
-        "message": "API is working!",
+        "message": "API is working! (Optimized with gpt-4o-mini)",
+        "model": "gpt-4o-mini",
+        "max_tokens": 1000,
+        "temperature": 0.5,
         "openai_configured": bool(os.getenv('OPENAI_API_KEY')),
         "supabase_configured": bool(os.getenv('SUPABASE_URL')),
         "api_key_configured": bool(os.getenv('API_KEY')),
