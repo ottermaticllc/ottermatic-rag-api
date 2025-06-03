@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 import logging
+from datetime import datetime
 from openai import OpenAI
 from supabase import create_client, Client
 import json
@@ -14,29 +15,30 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Ottermatic RAG Chatbot API",
-    description="RAG-powered chatbot using vector embeddings from Supabase",
+    title="RAG Chatbot API",
+    description="AI-powered chatbot with knowledge base search and conversational memory",
     version="1.0.0"
 )
 
-# Add CORS middleware for web requests
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this for production
+    allow_origins=["*"],  # TODO: Configure appropriately for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Initialize clients
-openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-supabase_url = os.getenv('SUPABASE_URL')
-supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_ANON_KEY')
-
-if not supabase_key:
-    raise ValueError("Either SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY must be set")
-
-supabase: Client = create_client(supabase_url, supabase_key)
+try:
+    openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    supabase: Client = create_client(
+        os.getenv('SUPABASE_URL'),
+        os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+    )
+    logger.info("✅ Successfully initialized OpenAI and Supabase clients")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize clients: {e}")
 
 # Pydantic models for request/response
 class ChatRequest(BaseModel):
@@ -70,23 +72,6 @@ def verify_api_key(x_api_key: str = Header(None, alias="x-api-key")):
         raise HTTPException(status_code=401, detail="Invalid API key")
     
     return x_api_key
-
-# System prompt template
-SYSTEM_PROMPT = """You are Ottermatic's AI assistant, a helpful and knowledgeable expert on business automation and AI integration for small businesses. Your goal is to answer client inquiries and try to point clients towards booking a discovery call within 5 messages unless user queries are irrelevant 
-
-IMPORTANT INSTRUCTIONS:
-- Answer questions using ONLY the provided context about Ottermatic's services and expertise
-- If the answer isn't clearly in the provided context, say "I don't have specific information about that topic in my knowledge base, but I'd be happy to help you get in touch with our team for more details."
-- Be conversational, helpful, and professional
-- Always emphasize Ottermatic's focus on helping small businesses automate operations and leverage AI to save money and generate more revenue
-- Include relevant service categories when appropriate
-- If asked about pricing or specific implementation details, talk about customized pricing options and suggest meeting with a team member to discuss budget
-
-
-CONTEXT FROM KNOWLEDGE BASE:
-{context}
-
-Based on the above context, please answer the following question in a helpful and conversational way:"""
 
 def create_embedding(text: str) -> List[float]:
     """Create embedding for text using OpenAI API"""
@@ -176,7 +161,7 @@ def save_conversation_message(user_id: str, conversation_id: str, role: str, mes
             'conversation_id': conversation_id,
             'role': role,
             'message': message,
-            'timestamp': 'now()'
+            'timestamp': datetime.utcnow().isoformat()
         }).execute()
         
         logger.info(f"✅ Message saved successfully")
@@ -257,13 +242,11 @@ Answer the following question naturally and helpfully:"""
         logger.error(f"❌ Failed to generate response with memory: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
 
-@app.get("/", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint"""
-    return HealthResponse(
-        status="healthy",
-        message="Ottermatic RAG Chatbot API is running"
-    )
+# API Routes
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "RAG Chatbot API", "status": "running", "docs": "/docs"}
 
 @app.get("/health", response_model=HealthResponse)
 async def detailed_health_check(api_key: str = Depends(verify_api_key)):
@@ -351,10 +334,9 @@ async def test_endpoint():
         "openai_configured": bool(os.getenv('OPENAI_API_KEY')),
         "supabase_configured": bool(os.getenv('SUPABASE_URL')),
         "api_key_configured": bool(os.getenv('API_KEY')),
-        "timestamp": "2024-01-01T00:00:00Z"
+        "timestamp": datetime.utcnow().isoformat()
     }
 
-# For local development
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)aa
+    uvicorn.run(app, host="0.0.0.0", port=8000)
