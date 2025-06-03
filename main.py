@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="RAG Chatbot API",
+    title="Ottermatic RAG Chatbot API",
     description="AI-powered chatbot with knowledge base search and conversational memory",
-    version="1.0.0"
+    version="1.0.2"
 )
 
 # Add CORS middleware
@@ -40,7 +40,7 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize clients: {e}")
 
-# Pydantic models for request/response
+# Pydantic models
 class ChatRequest(BaseModel):
     question: str
     user_id: Optional[str] = None
@@ -58,104 +58,93 @@ class HealthResponse(BaseModel):
     status: str
     message: str
 
-# API Key Authentication
+# API Key authentication
 def verify_api_key(x_api_key: str = Header(None, alias="x-api-key")):
-    """Verify API key from header"""
+    """Verify API key for secure access"""
     expected_key = os.getenv('API_KEY')
     if not expected_key:
         raise HTTPException(status_code=500, detail="API key not configured on server")
-    
-    if not x_api_key:
-        raise HTTPException(status_code=401, detail="API key required. Include 'x-api-key' header.")
-    
-    if x_api_key != expected_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    
+    if not x_api_key or x_api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return x_api_key
 
 def create_embedding(text: str) -> List[float]:
-    """Create embedding for text using OpenAI API"""
+    """Generate vector embedding for text using OpenAI"""
     try:
-        logger.info(f"Creating embedding for text: {text[:100]}...")
+        logger.info("🔍 Generating embedding for vector search...")
         response = openai_client.embeddings.create(
             model="text-embedding-ada-002",
             input=text
         )
-        logger.info("✅ Successfully created embedding")
+        logger.info("✅ Embedding generated successfully")
         return response.data[0].embedding
     except Exception as e:
-        logger.error(f"❌ Failed to create embedding: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create embedding: {str(e)}")
+        logger.error(f"❌ Embedding generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create embedding")
 
 def search_knowledge_base(query_embedding: List[float], max_results: int = 5) -> List[dict]:
-    """Search knowledge base using vector similarity"""
+    """Search Supabase knowledge base using vector similarity"""
     try:
-        logger.info(f"Searching knowledge base for {max_results} similar documents...")
+        logger.info("🔎 Searching knowledge base with vector similarity...")
         
-        # Convert embedding to string format for Supabase
+        # Convert embedding to string format for Supabase RPC
         embedding_str = str(query_embedding)
         
-        # Perform vector similarity search using RPC function
+        # Try using the match_documents RPC function first
         result = supabase.rpc(
             'match_documents',
             {
                 'query_embedding': embedding_str,
-                'match_threshold': 0.5,  # Minimum similarity threshold
+                'match_threshold': 0.5,
                 'match_count': max_results
             }
         ).execute()
         
-        if result.data:
-            logger.info(f"✅ Found {len(result.data)} matching documents via RPC function")
-            return result.data
-        else:
-            # Fallback to basic similarity search if RPC function doesn't exist
-            logger.warning("⚠️ RPC function not found, using basic similarity search")
-            result = supabase.table('knowledge_base').select('*').execute()
-            limited_results = result.data[:max_results] if result.data else []
-            logger.info(f"✅ Found {len(limited_results)} documents via fallback method")
-            return limited_results
-            
+        logger.info(f"📊 Found {len(result.data) if result.data else 0} relevant documents")
+        return result.data or []
+        
     except Exception as e:
-        logger.error(f"❌ Failed to search knowledge base: {e}")
-        # Return empty list to continue with generic response
-        return []
+        logger.warning(f"⚠️ RPC search failed, trying fallback method: {e}")
+        
+        # Fallback: simple table query
+        try:
+            result = supabase.table('knowledge_base').select('*').execute()
+            fallback_results = result.data[:max_results] if result.data else []
+            logger.info(f"📋 Fallback search returned {len(fallback_results)} documents")
+            return fallback_results
+        except Exception as fallback_error:
+            logger.error(f"❌ All search methods failed: {fallback_error}")
+            return []
 
 def format_context(search_results: List[dict]) -> tuple[str, List[str], float]:
-    """Format search results into context string and extract sources"""
+    """Format search results into context for LLM"""
     if not search_results:
         logger.warning("⚠️ No search results to format")
-        return "No specific information found in knowledge base.", [], 0.0
-    
+        return "No matching knowledge base entries found.", [], 0.0
+
     context_parts = []
     sources = []
     total_similarity = 0
-    
+
     for i, result in enumerate(search_results):
-        title = result.get('title', 'Unknown')
-        category = result.get('category', 'General')
-        content = result.get('content', '')
-        similarity = result.get('similarity', 0.5)
+        title = result.get("title", "Unknown Document")
+        category = result.get("category", "General")
+        content = result.get("content", "")
+        similarity = result.get("similarity", 0.5)  # Default similarity if not provided
         
-        # Add to context
         context_parts.append(f"Source {i+1} - {title} ({category}):\n{content}\n")
-        
-        # Track sources and similarity
         sources.append(f"{title} ({category})")
         total_similarity += similarity
-    
-    # Calculate average confidence
-    avg_confidence = total_similarity / len(search_results) if search_results else 0.0
-    
+
     context = "\n".join(context_parts)
-    logger.info(f"✅ Formatted context from {len(search_results)} sources with avg confidence: {avg_confidence:.3f}")
+    avg_confidence = total_similarity / len(search_results)
+    
+    logger.info(f"📝 Formatted context from {len(search_results)} sources with avg confidence: {avg_confidence:.3f}")
     return context, sources, avg_confidence
 
 def save_conversation_message(user_id: str, conversation_id: str, role: str, message: str):
-    """Save a message to the conversation_logs table"""
+    """Save individual message to conversation log"""
     try:
-        logger.info(f"💾 Saving {role} message to conversation {conversation_id}")
-        
         result = supabase.table('conversation_logs').insert({
             'user_id': user_id,
             'conversation_id': conversation_id,
@@ -163,108 +152,100 @@ def save_conversation_message(user_id: str, conversation_id: str, role: str, mes
             'message': message,
             'timestamp': datetime.utcnow().isoformat()
         }).execute()
-        
-        logger.info(f"✅ Message saved successfully")
-        return result.data
-        
+        logger.info(f"💾 Saved {role} message to conversation {conversation_id}")
     except Exception as e:
-        logger.error(f"❌ Failed to save conversation message: {e}")
-        # Don't raise exception - conversation should continue even if logging fails
-        return None
+        logger.warning(f"⚠️ Failed to save conversation message: {e}")
 
-def get_conversation_context(conversation_id: str, max_messages: int = 10) -> str:
-    """Retrieve recent conversation history for context"""
+def get_conversation_context(conversation_id: str, max_messages: int = 6) -> List[dict]:
+    """Get recent conversation history as structured messages"""
     try:
-        logger.info(f"📚 Retrieving conversation context for {conversation_id}")
+        result = supabase.table('conversation_logs').select(
+            'role, message, timestamp'
+        ).eq('conversation_id', conversation_id).order(
+            'timestamp', desc=False
+        ).limit(max_messages).execute()
         
-        result = supabase.table('conversation_logs').select('role, message, timestamp').eq(
-            'conversation_id', conversation_id
-        ).order('timestamp', desc=False).limit(max_messages).execute()
-        
-        if not result.data:
-            logger.info("No previous conversation history found")
-            return ""
-        
-        # Format conversation history
-        context_parts = []
-        for msg in result.data:
-            role = msg['role'].title()  # User/Assistant
-            message = msg['message']
-            context_parts.append(f"{role}: {message}")
-        
-        context = "\n".join(context_parts)
-        logger.info(f"✅ Retrieved {len(result.data)} previous messages")
-        return context
-        
+        messages = result.data if result.data else []
+        logger.info(f"📚 Retrieved {len(messages)} previous messages for context")
+        return messages
     except Exception as e:
-        logger.error(f"❌ Failed to retrieve conversation context: {e}")
-        return ""  # Return empty context if retrieval fails
+        logger.warning(f"⚠️ Error loading conversation memory: {e}")
+        return []
 
-def generate_response_with_memory(question: str, rag_context: str, conversation_context: str) -> str:
-    """Generate response using OpenAI GPT with both RAG context and conversation memory"""
+def generate_response_with_memory(question: str, rag_context: str, conversation_history: List[dict]) -> str:
+    """Generate response using both RAG context and conversation memory"""
     try:
-        logger.info("🧠 Generating response with conversation memory...")
-        
-        # Enhanced system prompt that includes conversation context
-        enhanced_prompt = f"""You are a helpful AI assistant with access to a knowledge base and conversation history.
+        # Build messages array for OpenAI Chat Completions
+        messages = [
+            {
+                "role": "system", 
+                "content": f"""You are Ottermatic's helpful AI assistant with access to a comprehensive knowledge base about our services, policies, and information.
 
 KNOWLEDGE BASE CONTEXT:
 {rag_context}
 
-CONVERSATION HISTORY:
-{conversation_context}
-
-Instructions:
-1. Use the knowledge base context to provide accurate, specific information
-2. Reference the conversation history to maintain context and continuity
-3. If the user refers to something from earlier in the conversation, acknowledge it
-4. Provide helpful, conversational responses that feel natural
-5. If you don't know something, say so clearly
-6. Keep responses concise but complete
-
-Answer the following question naturally and helpfully:"""
+Guidelines:
+- Use the knowledge base information to provide accurate, specific answers
+- Reference conversation history to maintain context and avoid repeating information
+- If the user asks follow-up questions, build on previous responses
+- If information isn't in the knowledge base, acknowledge this clearly
+- Keep responses helpful, professional, and conversational"""
+            }
+        ]
+        
+        # Add conversation history (last 6 messages for context)
+        for msg in conversation_history[-6:]:  # Limit to prevent token overflow
+            messages.append({
+                "role": msg['role'],
+                "content": msg['message']
+            })
+        
+        # Add current question
+        messages.append({
+            "role": "user",
+            "content": question
+        })
+        
+        logger.info(f"💬 Generating response with {len(conversation_history)} previous messages")
         
         response = openai_client.chat.completions.create(
             model="gpt-4",
-            messages=[
-                {"role": "system", "content": enhanced_prompt},
-                {"role": "user", "content": question}
-            ],
+            messages=messages,
             max_tokens=500,
             temperature=0.7
         )
         
-        answer = response.choices[0].message.content
-        logger.info(f"✅ Generated response with memory: {answer[:100]}...")
+        answer = response.choices[0].message.content.strip()
+        logger.info("✅ Response generated successfully")
         return answer
         
     except Exception as e:
-        logger.error(f"❌ Failed to generate response with memory: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
+        logger.error(f"❌ Chat generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate response")
 
-# API Routes
-@app.get("/")
+# API Endpoints
+@app.get("/", response_model=HealthResponse)
 async def root():
-    """Root endpoint"""
-    return {"message": "RAG Chatbot API", "status": "running", "docs": "/docs"}
+    """Root endpoint - API status check"""
+    return HealthResponse(
+        status="running",
+        message="RAG Chatbot API"
+    )
 
 @app.get("/health", response_model=HealthResponse)
-async def detailed_health_check(api_key: str = Depends(verify_api_key)):
-    """Detailed health check with service validation - requires API key"""
+async def health_check(api_key: str = Depends(verify_api_key)):
+    """Detailed health check - requires API key"""
     try:
-        logger.info("Performing detailed health check...")
-        
         # Test OpenAI connection
         openai_client.models.list()
-        logger.info("✅ OpenAI connection successful")
         
         # Test Supabase connection
-        supabase.table('knowledge_base').select('id').limit(1).execute()
-        logger.info("✅ Supabase connection successful")
+        supabase.table("knowledge_base").select("id").limit(1).execute()
         
+        logger.info("✅ Health check passed - all systems operational")
         return HealthResponse(
             status="healthy",
-            message="All services are operational"
+            message="All systems operational"
         )
     except Exception as e:
         logger.error(f"❌ Health check failed: {e}")
@@ -272,63 +253,54 @@ async def detailed_health_check(api_key: str = Depends(verify_api_key)):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
-    """Main chat endpoint for RAG-powered responses with conversational memory - requires API key"""
+    """Main chat endpoint with RAG and conversation memory"""
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    import uuid
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    
+    logger.info(f"🔄 Processing chat request for conversation: {conversation_id}")
+
     try:
-        logger.info(f"🔥 Processing chat request from user: {request.user_id}")
-        logger.info(f"📝 Question: {request.question[:100]}...")
+        # Get conversation history as structured messages
+        conversation_history = get_conversation_context(conversation_id, max_messages=10)
         
-        # Validate input
-        if not request.question.strip():
-            raise HTTPException(status_code=400, detail="Question cannot be empty")
-        
-        # Generate conversation_id if not provided
-        if not request.conversation_id:
-            import uuid
-            request.conversation_id = str(uuid.uuid4())
-            logger.info(f"🆕 Generated new conversation_id: {request.conversation_id}")
-        
-        # Get conversation context for memory
-        conversation_context = get_conversation_context(request.conversation_id, max_messages=10)
-        
-        # Create embedding for the question
-        query_embedding = create_embedding(request.question)
-        
-        # Search knowledge base
-        search_results = search_knowledge_base(query_embedding, request.max_results)
-        
-        # Format context and extract sources
+        # Create embedding and search knowledge base
+        logger.info("🔍 Creating embedding for knowledge base search...")
+        embedding = create_embedding(request.question)
+        search_results = search_knowledge_base(embedding, request.max_results)
         rag_context, sources, confidence = format_context(search_results)
         
-        # Generate response using GPT with both RAG context and conversation memory
-        answer = generate_response_with_memory(request.question, rag_context, conversation_context)
-        
-        # Save user message to conversation log
+        # Generate response using both RAG and conversation memory
+        logger.info("🤖 Generating response with conversation memory...")
+        answer = generate_response_with_memory(request.question, rag_context, conversation_history)
+
+        # Save conversation (user message and assistant response)
         if request.user_id:
-            save_conversation_message(request.user_id, request.conversation_id, "user", request.question)
-            # Save assistant response to conversation log
-            save_conversation_message(request.user_id, request.conversation_id, "assistant", answer)
+            logger.info("💾 Saving conversation messages...")
+            save_conversation_message(request.user_id, conversation_id, "user", request.question)
+            save_conversation_message(request.user_id, conversation_id, "assistant", answer)
+
+        logger.info(f"✅ Chat response generated with confidence: {confidence}")
         
-        # Return response
-        response = ChatResponse(
+        return ChatResponse(
             answer=answer,
             sources=sources,
             confidence=round(confidence, 3),
-            conversation_id=request.conversation_id,
+            conversation_id=conversation_id,
             user_id=request.user_id
         )
         
-        logger.info(f"✅ Chat request completed successfully for conversation: {request.conversation_id}")
-        return response
-        
     except HTTPException:
-        raise
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        logger.error(f"❌ Chat endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"❌ Unexpected error in chat endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/test")
 async def test_endpoint():
-    """Test endpoint to verify API is working - no auth required"""
+    """Test endpoint to verify configuration (no auth required)"""
     return {
         "message": "API is working!",
         "openai_configured": bool(os.getenv('OPENAI_API_KEY')),
@@ -337,6 +309,7 @@ async def test_endpoint():
         "timestamp": datetime.utcnow().isoformat()
     }
 
+# Local development server
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
