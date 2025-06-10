@@ -1,5 +1,6 @@
 import os
 import logging
+import traceback
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 from supabase import create_client, Client
+import uuid  # Add this import at the top
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Ottermatic RAG Chatbot API",
     description="AI-powered chatbot with knowledge base search and conversational memory",
-    version="1.0.5"
+    version="1.0.6"
 )
 
 app.add_middleware(
@@ -62,7 +64,6 @@ def verify_api_key(x_api_key: str = Header(None, alias="x-api-key")):
     return x_api_key
 
 # Embedding
-
 def create_embedding(text: str) -> List[float]:
     try:
         response = openai_client.embeddings.create(
@@ -75,7 +76,6 @@ def create_embedding(text: str) -> List[float]:
         raise HTTPException(status_code=500, detail="Embedding error")
 
 # Search
-
 def search_knowledge_base(query_embedding: List[float], max_results: int = 5) -> List[dict]:
     try:
         result = supabase.rpc('match_documents', {
@@ -94,7 +94,6 @@ def search_knowledge_base(query_embedding: List[float], max_results: int = 5) ->
             return []
 
 # Format context
-
 def format_context(search_results: List[dict]) -> tuple[str, List[str], float]:
     if not search_results:
         return "No matching documents found.", [], 0.0
@@ -110,7 +109,6 @@ def format_context(search_results: List[dict]) -> tuple[str, List[str], float]:
     return "\n".join(context), sources, total_similarity / len(search_results)
 
 # Memory
-
 def save_conversation_message(user_id: str, conversation_id: str, role: str, message: str):
     try:
         supabase.table('conversation_logs').insert({
@@ -133,58 +131,70 @@ def get_conversation_context(conversation_id: str, max_messages: int = 10) -> Li
         return []
 
 # Generate response
-
 def generate_response_with_memory(question: str, rag_context: str, conversation_history: List[dict]) -> str:
     try:
         user_message_count = sum(1 for msg in conversation_history if msg['role'] == 'user')
-        
-        # Try different paths to find the file
-        import os
+
+        # Try multiple paths to find the prompt file
         possible_paths = [
-            "prompts/otto_prompt.txt",  # relative path
-            "/var/task/prompts/otto_prompt.txt",  # Vercel's typical path
-            os.path.join(os.path.dirname(__file__), "prompts", "otto_prompt.txt")  # relative to script
+            "prompts/otto_prompt.txt",
+            "/var/task/prompts/otto_prompt.txt",
+            os.path.join(os.path.dirname(__file__), "prompts", "otto_prompt.txt")
         ]
+
+        # Add debug logging
+        logger.info("🔍 Looking for prompt file...")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Script location: {__file__}")
+        logger.info(f"Directory contents: {os.listdir('.')}")
         
+        # Check if prompts directory exists
+        if os.path.exists('prompts'):
+            logger.info(f"Prompts directory contents: {os.listdir('prompts')}")
+
         prompt_template = None
         for path in possible_paths:
+            logger.info(f"Trying path: {path}")
             try:
                 with open(path, "r") as f:
                     prompt_template = f.read()
                     logger.info(f"✅ Loaded prompt from: {path}")
                     break
             except FileNotFoundError:
+                logger.info(f"❌ Not found at: {path}")
                 continue
-        
+
         if not prompt_template:
             logger.error("❌ Could not find otto_prompt.txt in any expected location")
             raise FileNotFoundError("Prompt file not found")
-        
+
         system_prompt = prompt_template.format(
             rag_context=rag_context,
             user_message_count=user_message_count
         )
-        
+
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": m['role'], "content": m['message']} for m in conversation_history[-10:])
         messages.append({"role": "user", "content": question})
-        
+
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             max_tokens=400,
             temperature=0.6
         )
+
         return response.choices[0].message.content.strip()
+
     except Exception as e:
-        logger.error(f"Generate response failed: {e}")
+        logger.error(f"❌ Generate response failed: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Chat generation error: {str(e)}")
 
 # Routes
-
 @app.get("/", response_model=HealthResponse)
 async def root():
-    return HealthResponse(status="running", message="Chatbot online")
+    return HealthResponse(status="running", message="Chatbot online v1.0.6")
 
 @app.get("/health", response_model=HealthResponse)
 async def health(api_key: str = Depends(verify_api_key)):
@@ -201,7 +211,6 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Empty question")
 
-    import uuid
     conversation_id = request.conversation_id or str(uuid.uuid4())
     history = get_conversation_context(conversation_id, max_messages=15)
 
