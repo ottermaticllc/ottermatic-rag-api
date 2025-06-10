@@ -137,19 +137,38 @@ def get_conversation_context(conversation_id: str, max_messages: int = 10) -> Li
 def generate_response_with_memory(question: str, rag_context: str, conversation_history: List[dict]) -> str:
     try:
         user_message_count = sum(1 for msg in conversation_history if msg['role'] == 'user')
-
-        with open("prompts/otto_prompt.txt", "r") as f:
-            prompt_template = f.read()
-
+        
+        # Try different paths to find the file
+        import os
+        possible_paths = [
+            "prompts/otto_prompt.txt",  # relative path
+            "/var/task/prompts/otto_prompt.txt",  # Vercel's typical path
+            os.path.join(os.path.dirname(__file__), "prompts", "otto_prompt.txt")  # relative to script
+        ]
+        
+        prompt_template = None
+        for path in possible_paths:
+            try:
+                with open(path, "r") as f:
+                    prompt_template = f.read()
+                    logger.info(f"✅ Loaded prompt from: {path}")
+                    break
+            except FileNotFoundError:
+                continue
+        
+        if not prompt_template:
+            logger.error("❌ Could not find otto_prompt.txt in any expected location")
+            raise FileNotFoundError("Prompt file not found")
+        
         system_prompt = prompt_template.format(
             rag_context=rag_context,
             user_message_count=user_message_count
         )
-
+        
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": m['role'], "content": m['message']} for m in conversation_history[-10:])
         messages.append({"role": "user", "content": question})
-
+        
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -159,7 +178,7 @@ def generate_response_with_memory(question: str, rag_context: str, conversation_
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Generate response failed: {e}")
-        raise HTTPException(status_code=500, detail="Chat generation error")
+        raise HTTPException(status_code=500, detail=f"Chat generation error: {str(e)}")
 
 # Routes
 
