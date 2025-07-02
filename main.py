@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from openai import OpenAI
 from supabase import create_client, Client
 import uuid  # Add this import at the top
+import re  # Add regex import for URL conversion
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -130,6 +131,22 @@ def get_conversation_context(conversation_id: str, max_messages: int = 10) -> Li
         logger.error(f"Load memory failed: {e}")
         return []
 
+# Helper function to convert URLs to HTML links
+def convert_urls_to_links(text: str) -> str:
+    """Convert URLs in text to HTML anchor tags"""
+    # Pattern to match URLs
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    
+    def replace_url(match):
+        url = match.group(0)
+        # Special handling for Calendly links
+        if 'calendly.com' in url:
+            return f'<a href="{url}" target="_blank" rel="noopener noreferrer">Book your 15-minute intro call here</a>'
+        else:
+            return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{url}</a>'
+    
+    return re.sub(url_pattern, replace_url, text)
+
 # Generate response
 def generate_response_with_memory(question: str, rag_context: str, conversation_history: List[dict]) -> str:
     try:
@@ -184,7 +201,12 @@ def generate_response_with_memory(question: str, rag_context: str, conversation_
             temperature=0.6
         )
 
-        return response.choices[0].message.content.strip()
+        answer = response.choices[0].message.content.strip()
+        
+        # Convert URLs to HTML links
+        answer = convert_urls_to_links(answer)
+        
+        return answer
 
     except Exception as e:
         logger.error(f"❌ Generate response failed: {e}")
