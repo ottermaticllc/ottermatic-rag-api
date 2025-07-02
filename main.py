@@ -185,9 +185,13 @@ def generate_response_with_memory(question: str, rag_context: str, conversation_
             logger.error("❌ Could not find otto_prompt.txt in any expected location")
             raise FileNotFoundError("Prompt file not found")
 
+        # Dynamically calculate current month param for Calendly
+        current_month_param = datetime.utcnow().strftime("%Y-%m")
+
         system_prompt = prompt_template.format(
             rag_context=rag_context,
-            user_message_count=user_message_count
+            user_message_count=user_message_count,
+            current_month=current_month_param
         )
 
         messages = [{"role": "system", "content": system_prompt}]
