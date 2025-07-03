@@ -207,10 +207,8 @@ def generate_response_with_memory(question: str, rag_context: str, conversation_
 
         answer = response.choices[0].message.content.strip()
         
-        # Convert URLs to HTML links
-        answer = convert_urls_to_links(answer)
-        
         return answer
+        
 
     except Exception as e:
         logger.error(f"❌ Generate response failed: {e}")
